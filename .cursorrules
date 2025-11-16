@@ -1,0 +1,503 @@
+# Flashy Cardy Course - Cursor Rules
+
+## Project Overview
+This is a Next.js application built with TypeScript, React, and shadcn UI for all UI components.
+
+## Technology Stack
+- **Framework**: Next.js 15+ (App Router)
+- **Language**: TypeScript
+- **Styling**: Tailwind CSS
+- **UI Components**: shadcn UI
+- **Package Manager**: npm
+- **Database ORM**: Drizzle ORM
+- **Database**: PostgreSQL (via Neon)
+- **Validation**: Zod
+- **Authentication**: Clerk
+
+## Database Guidelines
+
+### Drizzle ORM Usage
+**ALL database interactions MUST use Drizzle ORM with the defined schema and queries.**
+
+### Schema Location
+- Database schema is defined in `db/schema.ts`
+- Database client is configured in `db/index.ts`
+- Always import tables and queries from these files
+
+### Database Schema
+Current tables:
+- **decksTable**: Stores flashcard decks (id, userId, name, description, createdAt, updatedAt)
+- **cardsTable**: Stores individual flashcards (id, deckId, front, back, createdAt, updatedAt)
+
+### Required Imports
+Always import the database client and schema from the correct locations:
+```typescript
+import { db } from "@/db"
+import { decksTable, cardsTable } from "@/db/schema"
+```
+
+### Query Patterns
+Use Drizzle's query builder for all database operations:
+
+**Select:**
+```typescript
+import { eq, desc } from "drizzle-orm"
+const decks = await db.select().from(decksTable).where(eq(decksTable.userId, userId))
+```
+
+**Insert:**
+```typescript
+const [newDeck] = await db.insert(decksTable).values({
+  userId: "user_123",
+  name: "My Deck",
+  description: "A sample deck"
+}).returning()
+```
+
+**Update:**
+```typescript
+await db.update(decksTable)
+  .set({ name: "Updated Name", updatedAt: new Date() })
+  .where(eq(decksTable.id, deckId))
+```
+
+**Delete:**
+```typescript
+await db.delete(decksTable).where(eq(decksTable.id, deckId))
+```
+
+### Best Practices
+1. **Never write raw SQL queries** - Always use Drizzle's query builder
+2. **Type Safety** - Leverage TypeScript types inferred from the schema
+3. **Transactions** - Use `db.transaction()` for operations that need atomicity
+4. **Relations** - Use proper foreign key references (e.g., `cardsTable.deckId` references `decksTable.id`)
+5. **Cascade Deletes** - Configured on `cardsTable` - deleting a deck automatically deletes its cards
+6. **Timestamps** - Always update `updatedAt` field when modifying records
+7. **User Isolation** - Always filter by `userId` (from Clerk) to ensure users only see their own data
+
+### API Routes with Database
+For API routes that interact with the database:
+```typescript
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { eq } from "drizzle-orm"
+import { auth } from "@clerk/nextjs/server"
+
+export async function GET() {
+  const { userId } = await auth()
+  if (!userId) return Response.json({ error: "Unauthorized" }, { status: 401 })
+  
+  const decks = await db.select().from(decksTable)
+    .where(eq(decksTable.userId, userId))
+  
+  return Response.json({ decks })
+}
+```
+
+### Server Actions with Database
+For Server Actions:
+```typescript
+"use server"
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { auth } from "@clerk/nextjs/server"
+import { revalidatePath } from "next/cache"
+
+export async function createDeck(name: string, description?: string) {
+  const { userId } = await auth()
+  if (!userId) throw new Error("Unauthorized")
+  
+  const [newDeck] = await db.insert(decksTable).values({
+    userId,
+    name,
+    description
+  }).returning()
+  
+  revalidatePath("/decks")
+  return newDeck
+}
+```
+
+### Migration Commands
+When schema changes are needed:
+```bash
+# Generate migrations
+npm run db:generate
+
+# Push changes to database
+npm run db:push
+
+# Run migrations
+npm run db:migrate
+```
+
+## Data Fetching & Server Actions Guidelines
+
+### Data Retrieval Pattern
+**ALL data retrieval MUST be done via Server Components.** Never fetch data in Client Components or API routes for rendering purposes.
+
+```typescript
+// ✅ CORRECT - Server Component fetching data
+import { auth } from "@clerk/nextjs/server"
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { eq } from "drizzle-orm"
+
+export default async function DecksPage() {
+  const { userId } = await auth()
+  if (!userId) redirect("/sign-in")
+  
+  // Fetch data directly in Server Component
+  const decks = await db
+    .select()
+    .from(decksTable)
+    .where(eq(decksTable.userId, userId))
+  
+  return <div>{/* Render decks */}</div>
+}
+```
+
+```typescript
+// ❌ WRONG - Client Component fetching data
+"use client"
+import { useEffect, useState } from "react"
+
+export default function DecksPage() {
+  const [decks, setDecks] = useState([])
+  
+  useEffect(() => {
+    fetch("/api/decks").then(r => r.json()).then(setDecks)
+  }, [])
+  
+  return <div>{/* Render decks */}</div>
+}
+```
+
+### Data Mutations Pattern
+**ALL data mutations (INSERT, UPDATE, DELETE) MUST be done via Server Actions.** Never perform mutations directly in API routes or Server Components.
+
+```typescript
+// ✅ CORRECT - Server Action for mutations
+"use server"
+
+import { auth } from "@clerk/nextjs/server"
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { revalidatePath } from "next/cache"
+import { z } from "zod"
+
+const createDeckSchema = z.object({
+  name: z.string().min(1, "Name is required").max(100),
+  description: z.string().max(500).optional(),
+})
+
+type CreateDeckInput = z.infer<typeof createDeckSchema>
+
+export async function createDeck(input: CreateDeckInput) {
+  // 1. Authenticate
+  const { userId } = await auth()
+  if (!userId) throw new Error("Unauthorized")
+  
+  // 2. Validate with Zod
+  const validated = createDeckSchema.parse(input)
+  
+  // 3. Perform mutation
+  const [newDeck] = await db
+    .insert(decksTable)
+    .values({
+      userId,
+      name: validated.name,
+      description: validated.description,
+    })
+    .returning()
+  
+  // 4. Revalidate
+  revalidatePath("/decks")
+  
+  return newDeck
+}
+```
+
+### Data Validation with Zod
+**ALL data passed to Server Actions MUST be validated using Zod.**
+
+#### Required Pattern:
+1. Define a Zod schema for the input
+2. Infer TypeScript type from the schema
+3. Use the TypeScript type for the function parameter
+4. Validate the input using `.parse()` or `.safeParse()`
+
+```typescript
+"use server"
+
+import { z } from "zod"
+import { auth } from "@clerk/nextjs/server"
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { eq } from "drizzle-orm"
+
+// 1. Define Zod schema
+const updateDeckSchema = z.object({
+  deckId: z.string().uuid(),
+  name: z.string().min(1).max(100),
+  description: z.string().max(500).optional(),
+})
+
+// 2. Infer TypeScript type
+type UpdateDeckInput = z.infer<typeof updateDeckSchema>
+
+// 3. Use inferred type for parameter (NOT FormData)
+export async function updateDeck(input: UpdateDeckInput) {
+  const { userId } = await auth()
+  if (!userId) throw new Error("Unauthorized")
+  
+  // 4. Validate input
+  const validated = updateDeckSchema.parse(input)
+  
+  // Verify ownership
+  const [deck] = await db
+    .select()
+    .from(decksTable)
+    .where(eq(decksTable.id, validated.deckId))
+    .limit(1)
+  
+  if (!deck || deck.userId !== userId) {
+    throw new Error("Forbidden")
+  }
+  
+  // Perform update
+  await db
+    .update(decksTable)
+    .set({
+      name: validated.name,
+      description: validated.description,
+      updatedAt: new Date(),
+    })
+    .where(eq(decksTable.id, validated.deckId))
+  
+  revalidatePath("/decks")
+}
+```
+
+### Common Validation Patterns
+
+**String validation:**
+```typescript
+z.string().min(1, "Required").max(100, "Too long")
+z.string().email("Invalid email")
+z.string().url("Invalid URL")
+z.string().uuid("Invalid ID")
+```
+
+**Number validation:**
+```typescript
+z.number().int().positive()
+z.number().min(0).max(100)
+```
+
+**Array validation:**
+```typescript
+z.array(z.string()).min(1, "At least one item required")
+```
+
+**Object validation:**
+```typescript
+z.object({
+  name: z.string(),
+  age: z.number(),
+})
+```
+
+**Optional fields:**
+```typescript
+z.string().optional()
+z.string().nullable()
+```
+
+### Error Handling with Zod
+
+Use `.safeParse()` for graceful error handling:
+
+```typescript
+export async function createDeck(input: CreateDeckInput) {
+  const { userId } = await auth()
+  if (!userId) throw new Error("Unauthorized")
+  
+  // Safe parse returns result object
+  const result = createDeckSchema.safeParse(input)
+  
+  if (!result.success) {
+    // Return validation errors to client
+    return {
+      success: false,
+      errors: result.error.flatten().fieldErrors,
+    }
+  }
+  
+  // Use validated data
+  const validated = result.data
+  
+  const [newDeck] = await db
+    .insert(decksTable)
+    .values({
+      userId,
+      name: validated.name,
+      description: validated.description,
+    })
+    .returning()
+  
+  revalidatePath("/decks")
+  
+  return {
+    success: true,
+    data: newDeck,
+  }
+}
+```
+
+### Calling Server Actions from Client Components
+
+```typescript
+"use client"
+
+import { createDeck } from "@/actions/deck-actions"
+import { useState } from "react"
+
+export function CreateDeckForm() {
+  const [error, setError] = useState("")
+  
+  async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault()
+    const formData = new FormData(e.currentTarget)
+    
+    try {
+      // Pass typed object, NOT FormData
+      await createDeck({
+        name: formData.get("name") as string,
+        description: formData.get("description") as string,
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to create deck")
+    }
+  }
+  
+  return (
+    <form onSubmit={handleSubmit}>
+      {/* form fields */}
+    </form>
+  )
+}
+```
+
+### Architecture Summary
+
+**✅ DO:**
+- Fetch data in Server Components
+- Mutate data via Server Actions
+- Always validate with Zod
+- Use TypeScript types inferred from Zod schemas
+- Pass typed objects to Server Actions
+
+**❌ DON'T:**
+- Fetch data in Client Components (use Server Components instead)
+- Use API routes for mutations (use Server Actions instead)
+- Skip validation
+- Use `FormData` as the type for Server Action parameters
+- Use `any` type for Server Action inputs
+
+## shadcn UI Guidelines
+
+### Initialization
+If shadcn UI is not initialized in the project, use:
+```bash
+npx shadcn@latest init
+```
+
+### Adding Components
+When a UI component is needed, ALWAYS use shadcn UI components. Install components as needed:
+```bash
+npx shadcn@latest add [component-name]
+```
+
+Examples:
+- `npx shadcn@latest add button`
+- `npx shadcn@latest add card`
+- `npx shadcn@latest add input`
+- `npx shadcn@latest add dialog`
+- `npx shadcn@latest add form`
+
+### Available Components
+Common shadcn components that might be needed:
+- button, card, input, label, textarea
+- dialog, sheet, popover, dropdown-menu
+- form, select, checkbox, radio-group, switch
+- table, tabs, accordion, alert
+- badge, avatar, tooltip, skeleton
+- toast, alert-dialog, context-menu
+
+**Always check if a component is installed before using it. If not, install it first.**
+
+## Code Style & Best Practices
+
+### File Organization
+- Use the App Router structure (`app/` directory)
+- Place reusable components in a `components/` directory
+- Utility functions go in `lib/`
+- Types and interfaces in appropriate `.ts` or `.d.ts` files
+
+### TypeScript
+- Always use TypeScript for type safety
+- Define proper types and interfaces
+- Avoid using `any` type when possible
+- Use type inference where appropriate
+
+### React Best Practices
+- Use functional components with hooks
+- Implement proper error boundaries
+- Use React Server Components when possible (default in Next.js App Router)
+- Add "use client" directive only when necessary (client-side interactivity)
+
+### Styling
+- Use Tailwind CSS utility classes for styling
+- Follow shadcn UI's styling patterns
+- Keep consistent spacing and design system
+- Use the utilities from `lib/utils.ts` (cn function for conditional classes)
+
+### Component Imports
+Always import shadcn UI components from the local components directory:
+```typescript
+import { Button } from "@/components/ui/button"
+import { Card, CardContent, CardHeader } from "@/components/ui/card"
+```
+
+### Accessibility
+- Ensure all interactive elements are keyboard accessible
+- Use semantic HTML elements
+- Include proper ARIA labels where needed
+- shadcn UI components come with accessibility built-in
+
+## Development Workflow
+
+1. **Before creating custom UI components**: Check if shadcn UI has a suitable component
+2. **Before using a shadcn component**: Verify it's installed, if not, install it
+3. **Styling**: Use Tailwind utilities and maintain consistency with existing design
+4. **Type Safety**: Define types for props, state, and API responses
+5. **Testing**: Test components for functionality and accessibility
+
+## File Naming Conventions
+- React components: PascalCase (e.g., `UserProfile.tsx`)
+- Utility files: kebab-case (e.g., `format-date.ts`)
+- Page routes: lowercase (e.g., `app/dashboard/page.tsx`)
+
+## Import Aliases
+Use the `@/` alias for absolute imports:
+```typescript
+import { cn } from "@/lib/utils"
+import { Button } from "@/components/ui/button"
+```
+
+## Notes
+- This project uses the Next.js App Router (not Pages Router)
+- Server Components are the default; use "use client" only when needed
+- All UI should use shadcn components for consistency
+

@@ -1,0 +1,335 @@
+---
+globs: app/api/**/*.ts,app/**/*actions*.ts,app/**/page.tsx,app/**/layout.tsx
+description: Security rules for database queries ensuring user data isolation
+---
+
+# Secure Database Query Patterns
+
+## Critical Rule: NEVER Query Without User Context
+
+Every database query in this application MUST enforce user data isolation. This rule applies to ALL files that interact with the database.
+
+## Required Pattern for Database Queries
+
+### Step 1: Import Required Modules
+```typescript
+import { auth } from "@clerk/nextjs/server"
+import { db } from "@/db"
+import { decksTable, cardsTable } from "@/db/schema"
+import { eq, and } from "drizzle-orm"
+```
+
+### Step 2: Authenticate and Get userId
+```typescript
+const { userId } = await auth()
+if (!userId) {
+  // Handle unauthorized access
+  throw new Error("Unauthorized")
+  // OR for API routes:
+  // return Response.json({ error: "Unauthorized" }, { status: 401 })
+}
+```
+
+### Step 3: Always Filter by userId
+```typescript
+// ✅ CORRECT - All queries filtered by userId
+const userDecks = await db
+  .select()
+  .from(decksTable)
+  .where(eq(decksTable.userId, userId))
+
+const userCards = await db
+  .select()
+  .from(cardsTable)
+  .innerJoin(decksTable, eq(cardsTable.deckId, decksTable.id))
+  .where(eq(decksTable.userId, userId))
+
+// ❌ WRONG - No userId filter
+const decks = await db.select().from(decksTable)
+```
+
+## Query Templates by Operation
+
+### SELECT Operations
+```typescript
+// Get all user's decks
+const decks = await db
+  .select()
+  .from(decksTable)
+  .where(eq(decksTable.userId, userId))
+
+// Get specific deck (with ownership check)
+const [deck] = await db
+  .select()
+  .from(decksTable)
+  .where(
+    and(
+      eq(decksTable.id, deckId),
+      eq(decksTable.userId, userId)
+    )
+  )
+  .limit(1)
+
+if (!deck) {
+  throw new Error("Deck not found or access denied")
+}
+
+// Get cards from user's deck
+const cards = await db
+  .select({
+    id: cardsTable.id,
+    front: cardsTable.front,
+    back: cardsTable.back,
+    deckId: cardsTable.deckId,
+  })
+  .from(cardsTable)
+  .innerJoin(decksTable, eq(cardsTable.deckId, decksTable.id))
+  .where(
+    and(
+      eq(cardsTable.deckId, deckId),
+      eq(decksTable.userId, userId)
+    )
+  )
+```
+
+### INSERT Operations
+```typescript
+// Always include userId when creating resources
+const [newDeck] = await db
+  .insert(decksTable)
+  .values({
+    userId,  // ← CRITICAL: Must include userId
+    name: "My Deck",
+    description: "Description",
+  })
+  .returning()
+
+// For related resources, verify parent ownership first
+const [deck] = await db
+  .select()
+  .from(decksTable)
+  .where(
+    and(
+      eq(decksTable.id, deckId),
+      eq(decksTable.userId, userId)
+    )
+  )
+  .limit(1)
+
+if (!deck) {
+  throw new Error("Deck not found or access denied")
+}
+
+// Then insert related resource
+const [newCard] = await db
+  .insert(cardsTable)
+  .values({
+    deckId: deck.id,  // Safe because we verified ownership
+    front: "Question",
+    back: "Answer",
+  })
+  .returning()
+```
+
+### UPDATE Operations
+```typescript
+// ALWAYS verify ownership before updating
+const [deck] = await db
+  .select()
+  .from(decksTable)
+  .where(
+    and(
+      eq(decksTable.id, deckId),
+      eq(decksTable.userId, userId)
+    )
+  )
+  .limit(1)
+
+if (!deck) {
+  throw new Error("Deck not found or access denied")
+}
+
+// Now safe to update
+await db
+  .update(decksTable)
+  .set({
+    name: "Updated Name",
+    updatedAt: new Date(),
+  })
+  .where(eq(decksTable.id, deckId))
+
+// For related resources (cards), verify parent deck ownership
+const [card] = await db
+  .select({
+    card: cardsTable,
+    deck: decksTable,
+  })
+  .from(cardsTable)
+  .innerJoin(decksTable, eq(cardsTable.deckId, decksTable.id))
+  .where(
+    and(
+      eq(cardsTable.id, cardId),
+      eq(decksTable.userId, userId)
+    )
+  )
+  .limit(1)
+
+if (!card) {
+  throw new Error("Card not found or access denied")
+}
+
+await db
+  .update(cardsTable)
+  .set({ front: "New question", back: "New answer", updatedAt: new Date() })
+  .where(eq(cardsTable.id, cardId))
+```
+
+### DELETE Operations
+```typescript
+// ALWAYS verify ownership before deleting
+const [deck] = await db
+  .select()
+  .from(decksTable)
+  .where(
+    and(
+      eq(decksTable.id, deckId),
+      eq(decksTable.userId, userId)
+    )
+  )
+  .limit(1)
+
+if (!deck) {
+  throw new Error("Deck not found or access denied")
+}
+
+// Now safe to delete (cascade will delete related cards)
+await db.delete(decksTable).where(eq(decksTable.id, deckId))
+
+// For cards, verify parent deck ownership
+const [card] = await db
+  .select({
+    card: cardsTable,
+    deck: decksTable,
+  })
+  .from(cardsTable)
+  .innerJoin(decksTable, eq(cardsTable.deckId, decksTable.id))
+  .where(
+    and(
+      eq(cardsTable.id, cardId),
+      eq(decksTable.userId, userId)
+    )
+  )
+  .limit(1)
+
+if (!card) {
+  throw new Error("Card not found or access denied")
+}
+
+await db.delete(cardsTable).where(eq(cardsTable.id, cardId))
+```
+
+## Transaction Safety
+When performing multiple operations, use transactions:
+
+```typescript
+await db.transaction(async (tx) => {
+  // Verify ownership
+  const [deck] = await tx
+    .select()
+    .from(decksTable)
+    .where(
+      and(
+        eq(decksTable.id, deckId),
+        eq(decksTable.userId, userId)
+      )
+    )
+    .limit(1)
+
+  if (!deck) {
+    throw new Error("Deck not found or access denied")
+  }
+
+  // Perform multiple operations atomically
+  await tx.update(decksTable)
+    .set({ name: "New Name" })
+    .where(eq(decksTable.id, deckId))
+
+  await tx.insert(cardsTable)
+    .values({ deckId, front: "Q", back: "A" })
+})
+```
+
+## Anti-Patterns to AVOID
+
+### ❌ Trusting Client Input Without Verification
+```typescript
+// WRONG - Client could send any deckId
+async function updateDeck(deckId: string, name: string) {
+  await db.update(decksTable)
+    .set({ name })
+    .where(eq(decksTable.id, deckId))
+}
+
+// CORRECT - Verify ownership
+async function updateDeck(deckId: string, name: string) {
+  const { userId } = await auth()
+  if (!userId) throw new Error("Unauthorized")
+
+  const [deck] = await db
+    .select()
+    .from(decksTable)
+    .where(and(eq(decksTable.id, deckId), eq(decksTable.userId, userId)))
+    .limit(1)
+
+  if (!deck) throw new Error("Access denied")
+
+  await db.update(decksTable)
+    .set({ name, updatedAt: new Date() })
+    .where(eq(decksTable.id, deckId))
+}
+```
+
+### ❌ Counting or Aggregating Without User Filter
+```typescript
+// WRONG - Counts all decks
+const totalDecks = await db
+  .select({ count: sql`count(*)` })
+  .from(decksTable)
+
+// CORRECT - Counts only user's decks
+const [result] = await db
+  .select({ count: sql`count(*)` })
+  .from(decksTable)
+  .where(eq(decksTable.userId, userId))
+```
+
+### ❌ Using Raw SQL Without Parameters
+```typescript
+// WRONG - Vulnerable and bypasses type safety
+await db.execute(sql`SELECT * FROM decks WHERE id = ${deckId}`)
+
+// CORRECT - Use query builder with proper filters
+const decks = await db
+  .select()
+  .from(decksTable)
+  .where(and(eq(decksTable.id, deckId), eq(decksTable.userId, userId)))
+```
+
+## Testing Data Isolation
+
+When testing any database feature:
+
+1. Create two test users
+2. Create resources for each user
+3. Verify User A cannot access User B's resources
+4. Verify User A cannot modify User B's resources
+5. Verify User A cannot delete User B's resources
+
+## Remember
+
+- **AUTHENTICATION**: Get userId from `auth()`
+- **AUTHORIZATION**: Filter by userId in queries
+- **VERIFICATION**: Check ownership before mutations
+- **ISOLATION**: Never expose other users' data
+
+Every database query is a potential security vulnerability if not properly filtered by userId.
