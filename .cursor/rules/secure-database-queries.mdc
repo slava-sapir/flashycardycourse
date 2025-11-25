@@ -1,5 +1,5 @@
 ---
-globs: app/api/**/*.ts,app/**/*actions*.ts,app/**/page.tsx,app/**/layout.tsx
+globs: app/api/**/*.ts,app/**/*actions*.ts,app/**/page.tsx,app/**/layout.tsx,db/queries/**/*.ts
 description: Security rules for database queries ensuring user data isolation
 ---
 
@@ -9,232 +9,66 @@ description: Security rules for database queries ensuring user data isolation
 
 Every database query in this application MUST enforce user data isolation. This rule applies to ALL files that interact with the database.
 
-## Required Pattern for Database Queries
+## ⚠️ MANDATORY: Use Helper Functions from `db/queries` Directory
 
-### Step 1: Import Required Modules
+**ALL database operations MUST be performed through helper functions in the `db/queries` directory.**
+
+### Why Use Helper Functions?
+- ✅ **Centralized Security**: All userId filtering logic in one place
+- ✅ **Reusability**: Same queries used across Server Components, Server Actions, and API routes
+- ✅ **Type Safety**: Better TypeScript inference
+- ✅ **Testability**: Easy to unit test query logic
+- ✅ **Maintainability**: Changes to queries happen in one place
+
+### Directory Structure
+```
+db/
+  ├── index.ts           # Database client
+  ├── schema.ts          # Database schema
+  └── queries/
+      ├── decks.ts       # All deck-related queries
+      ├── cards.ts       # All card-related queries
+      └── index.ts       # Re-export all queries
+```
+
+## Creating Query Helper Functions
+
+### Pattern for Query Helpers in `db/queries/*.ts`
+
+All query helpers MUST:
+1. Accept `userId` as the first parameter (for user-specific queries)
+2. Filter by `userId` in the query
+3. Return typed results
+4. Handle ownership verification internally
+
+### Example: `db/queries/decks.ts`
+
 ```typescript
-import { auth } from "@clerk/nextjs/server"
 import { db } from "@/db"
 import { decksTable, cardsTable } from "@/db/schema"
-import { eq, and } from "drizzle-orm"
-```
+import { eq, and, desc } from "drizzle-orm"
 
-### Step 2: Authenticate and Get userId
-```typescript
-const { userId } = await auth()
-if (!userId) {
-  // Handle unauthorized access
-  throw new Error("Unauthorized")
-  // OR for API routes:
-  // return Response.json({ error: "Unauthorized" }, { status: 401 })
-}
-```
+// ============================================
+// READ OPERATIONS
+// ============================================
 
-### Step 3: Always Filter by userId
-```typescript
-// ✅ CORRECT - All queries filtered by userId
-const userDecks = await db
-  .select()
-  .from(decksTable)
-  .where(eq(decksTable.userId, userId))
-
-const userCards = await db
-  .select()
-  .from(cardsTable)
-  .innerJoin(decksTable, eq(cardsTable.deckId, decksTable.id))
-  .where(eq(decksTable.userId, userId))
-
-// ❌ WRONG - No userId filter
-const decks = await db.select().from(decksTable)
-```
-
-## Query Templates by Operation
-
-### SELECT Operations
-```typescript
-// Get all user's decks
-const decks = await db
-  .select()
-  .from(decksTable)
-  .where(eq(decksTable.userId, userId))
-
-// Get specific deck (with ownership check)
-const [deck] = await db
-  .select()
-  .from(decksTable)
-  .where(
-    and(
-      eq(decksTable.id, deckId),
-      eq(decksTable.userId, userId)
-    )
-  )
-  .limit(1)
-
-if (!deck) {
-  throw new Error("Deck not found or access denied")
+/**
+ * Get all decks for a specific user
+ */
+export async function getUserDecks(userId: string) {
+  return await db
+    .select()
+    .from(decksTable)
+    .where(eq(decksTable.userId, userId))
+    .orderBy(desc(decksTable.updatedAt))
 }
 
-// Get cards from user's deck
-const cards = await db
-  .select({
-    id: cardsTable.id,
-    front: cardsTable.front,
-    back: cardsTable.back,
-    deckId: cardsTable.deckId,
-  })
-  .from(cardsTable)
-  .innerJoin(decksTable, eq(cardsTable.deckId, decksTable.id))
-  .where(
-    and(
-      eq(cardsTable.deckId, deckId),
-      eq(decksTable.userId, userId)
-    )
-  )
-```
-
-### INSERT Operations
-```typescript
-// Always include userId when creating resources
-const [newDeck] = await db
-  .insert(decksTable)
-  .values({
-    userId,  // ← CRITICAL: Must include userId
-    name: "My Deck",
-    description: "Description",
-  })
-  .returning()
-
-// For related resources, verify parent ownership first
-const [deck] = await db
-  .select()
-  .from(decksTable)
-  .where(
-    and(
-      eq(decksTable.id, deckId),
-      eq(decksTable.userId, userId)
-    )
-  )
-  .limit(1)
-
-if (!deck) {
-  throw new Error("Deck not found or access denied")
-}
-
-// Then insert related resource
-const [newCard] = await db
-  .insert(cardsTable)
-  .values({
-    deckId: deck.id,  // Safe because we verified ownership
-    front: "Question",
-    back: "Answer",
-  })
-  .returning()
-```
-
-### UPDATE Operations
-```typescript
-// ALWAYS verify ownership before updating
-const [deck] = await db
-  .select()
-  .from(decksTable)
-  .where(
-    and(
-      eq(decksTable.id, deckId),
-      eq(decksTable.userId, userId)
-    )
-  )
-  .limit(1)
-
-if (!deck) {
-  throw new Error("Deck not found or access denied")
-}
-
-// Now safe to update
-await db
-  .update(decksTable)
-  .set({
-    name: "Updated Name",
-    updatedAt: new Date(),
-  })
-  .where(eq(decksTable.id, deckId))
-
-// For related resources (cards), verify parent deck ownership
-const [card] = await db
-  .select({
-    card: cardsTable,
-    deck: decksTable,
-  })
-  .from(cardsTable)
-  .innerJoin(decksTable, eq(cardsTable.deckId, decksTable.id))
-  .where(
-    and(
-      eq(cardsTable.id, cardId),
-      eq(decksTable.userId, userId)
-    )
-  )
-  .limit(1)
-
-if (!card) {
-  throw new Error("Card not found or access denied")
-}
-
-await db
-  .update(cardsTable)
-  .set({ front: "New question", back: "New answer", updatedAt: new Date() })
-  .where(eq(cardsTable.id, cardId))
-```
-
-### DELETE Operations
-```typescript
-// ALWAYS verify ownership before deleting
-const [deck] = await db
-  .select()
-  .from(decksTable)
-  .where(
-    and(
-      eq(decksTable.id, deckId),
-      eq(decksTable.userId, userId)
-    )
-  )
-  .limit(1)
-
-if (!deck) {
-  throw new Error("Deck not found or access denied")
-}
-
-// Now safe to delete (cascade will delete related cards)
-await db.delete(decksTable).where(eq(decksTable.id, deckId))
-
-// For cards, verify parent deck ownership
-const [card] = await db
-  .select({
-    card: cardsTable,
-    deck: decksTable,
-  })
-  .from(cardsTable)
-  .innerJoin(decksTable, eq(cardsTable.deckId, decksTable.id))
-  .where(
-    and(
-      eq(cardsTable.id, cardId),
-      eq(decksTable.userId, userId)
-    )
-  )
-  .limit(1)
-
-if (!card) {
-  throw new Error("Card not found or access denied")
-}
-
-await db.delete(cardsTable).where(eq(cardsTable.id, cardId))
-```
-
-## Transaction Safety
-When performing multiple operations, use transactions:
-
-```typescript
-await db.transaction(async (tx) => {
-  // Verify ownership
-  const [deck] = await tx
+/**
+ * Get a specific deck by ID, ensuring user ownership
+ * Returns null if deck doesn't exist or user doesn't own it
+ */
+export async function getUserDeckById(userId: string, deckId: string) {
+  const [deck] = await db
     .select()
     .from(decksTable)
     .where(
@@ -245,33 +79,910 @@ await db.transaction(async (tx) => {
     )
     .limit(1)
 
+  return deck ?? null
+}
+
+/**
+ * Get deck with card count
+ */
+export async function getUserDeckWithCardCount(userId: string, deckId: string) {
+  const deck = await getUserDeckById(userId, deckId)
+  if (!deck) return null
+
+  const cards = await db
+    .select()
+    .from(cardsTable)
+    .where(eq(cardsTable.deckId, deckId))
+
+  return {
+    ...deck,
+    cardCount: cards.length,
+  }
+}
+
+// ============================================
+// WRITE OPERATIONS
+// ============================================
+
+/**
+ * Create a new deck for a user
+ */
+export async function createDeck(
+  userId: string,
+  data: { name: string; description?: string }
+) {
+  const [newDeck] = await db
+    .insert(decksTable)
+    .values({
+      userId,
+      name: data.name,
+      description: data.description,
+    })
+    .returning()
+
+  return newDeck
+}
+
+/**
+ * Update a deck, with ownership verification
+ * Throws error if user doesn't own the deck
+ */
+export async function updateDeck(
+  userId: string,
+  deckId: string,
+  data: { name?: string; description?: string }
+) {
+  // Verify ownership first
+  const deck = await getUserDeckById(userId, deckId)
   if (!deck) {
     throw new Error("Deck not found or access denied")
   }
 
-  // Perform multiple operations atomically
-  await tx.update(decksTable)
-    .set({ name: "New Name" })
+  const [updatedDeck] = await db
+    .update(decksTable)
+    .set({
+      ...data,
+      updatedAt: new Date(),
+    })
     .where(eq(decksTable.id, deckId))
+    .returning()
 
-  await tx.insert(cardsTable)
-    .values({ deckId, front: "Q", back: "A" })
+  return updatedDeck
+}
+
+/**
+ * Delete a deck, with ownership verification
+ * Throws error if user doesn't own the deck
+ */
+export async function deleteDeck(userId: string, deckId: string) {
+  // Verify ownership first
+  const deck = await getUserDeckById(userId, deckId)
+  if (!deck) {
+    throw new Error("Deck not found or access denied")
+  }
+
+  // Delete deck (cascade will delete related cards)
+  await db.delete(decksTable).where(eq(decksTable.id, deckId))
+
+  return { success: true }
+}
+```
+
+### Example: `db/queries/cards.ts`
+
+```typescript
+import { db } from "@/db"
+import { cardsTable, decksTable } from "@/db/schema"
+import { eq, and } from "drizzle-orm"
+import { getUserDeckById } from "./decks"
+
+// ============================================
+// READ OPERATIONS
+// ============================================
+
+/**
+ * Get all cards for a specific deck, with ownership verification
+ */
+export async function getDeckCards(userId: string, deckId: string) {
+  // Verify user owns the deck
+  const deck = await getUserDeckById(userId, deckId)
+  if (!deck) {
+    throw new Error("Deck not found or access denied")
+  }
+
+  return await db
+    .select()
+    .from(cardsTable)
+    .where(eq(cardsTable.deckId, deckId))
+}
+
+/**
+ * Get a specific card by ID, with ownership verification
+ */
+export async function getCardById(userId: string, cardId: string) {
+  const [result] = await db
+    .select({
+      card: cardsTable,
+      deck: decksTable,
+    })
+    .from(cardsTable)
+    .innerJoin(decksTable, eq(cardsTable.deckId, decksTable.id))
+    .where(
+      and(
+        eq(cardsTable.id, cardId),
+        eq(decksTable.userId, userId)
+      )
+    )
+    .limit(1)
+
+  return result ?? null
+}
+
+// ============================================
+// WRITE OPERATIONS
+// ============================================
+
+/**
+ * Create a new card in a deck, with ownership verification
+ */
+export async function createCard(
+  userId: string,
+  deckId: string,
+  data: { front: string; back: string }
+) {
+  // Verify user owns the deck
+  const deck = await getUserDeckById(userId, deckId)
+  if (!deck) {
+    throw new Error("Deck not found or access denied")
+  }
+
+  const [newCard] = await db
+    .insert(cardsTable)
+    .values({
+      deckId,
+      front: data.front,
+      back: data.back,
+    })
+    .returning()
+
+  return newCard
+}
+
+/**
+ * Update a card, with ownership verification
+ */
+export async function updateCard(
+  userId: string,
+  cardId: string,
+  data: { front?: string; back?: string }
+) {
+  // Verify user owns the card (through deck ownership)
+  const result = await getCardById(userId, cardId)
+  if (!result) {
+    throw new Error("Card not found or access denied")
+  }
+
+  const [updatedCard] = await db
+    .update(cardsTable)
+    .set({
+      ...data,
+      updatedAt: new Date(),
+    })
+    .where(eq(cardsTable.id, cardId))
+    .returning()
+
+  return updatedCard
+}
+
+/**
+ * Delete a card, with ownership verification
+ */
+export async function deleteCard(userId: string, cardId: string) {
+  // Verify user owns the card (through deck ownership)
+  const result = await getCardById(userId, cardId)
+  if (!result) {
+    throw new Error("Card not found or access denied")
+  }
+
+  await db.delete(cardsTable).where(eq(cardsTable.id, cardId))
+
+  return { success: true }
+}
+```
+
+### Example: `db/queries/index.ts`
+
+```typescript
+// Re-export all query functions
+export * from "./decks"
+export * from "./cards"
+```
+
+## Using Query Helpers in Your Application
+
+### In Server Components
+
+Server Components can directly use query helpers to fetch data:
+
+```typescript
+// app/decks/page.tsx
+import { auth } from "@clerk/nextjs/server"
+import { redirect } from "next/navigation"
+import { getUserDecks } from "@/db/queries"
+
+export default async function DecksPage() {
+  // 1. Authenticate user
+  const { userId } = await auth()
+  if (!userId) {
+    redirect("/")
+  }
+
+  // 2. Fetch data using query helper
+  const decks = await getUserDecks(userId)
+
+  return (
+    <div>
+      <h1>My Decks</h1>
+      {decks.map((deck) => (
+        <div key={deck.id}>{deck.name}</div>
+      ))}
+    </div>
+  )
+}
+```
+
+```typescript
+// app/decks/[deckId]/page.tsx
+import { auth } from "@clerk/nextjs/server"
+import { notFound, redirect } from "next/navigation"
+import { getUserDeckWithCardCount, getDeckCards } from "@/db/queries"
+
+export default async function DeckDetailPage({
+  params,
+}: {
+  params: { deckId: string }
+}) {
+  const { userId } = await auth()
+  if (!userId) {
+    redirect("/")
+  }
+
+  // Fetch deck with ownership verification built-in
+  const deck = await getUserDeckWithCardCount(userId, params.deckId)
+  if (!deck) {
+    notFound()
+  }
+
+  // Fetch cards for the deck
+  const cards = await getDeckCards(userId, params.deckId)
+
+  return (
+    <div>
+      <h1>{deck.name}</h1>
+      <p>{deck.cardCount} cards</p>
+      {/* Render cards */}
+    </div>
+  )
+}
+```
+
+### In Server Actions
+
+Server Actions use query helpers for mutations and data fetching:
+
+```typescript
+// app/actions/deck-actions.ts
+"use server"
+
+import { auth } from "@clerk/nextjs/server"
+import { revalidatePath } from "next/cache"
+import { z } from "zod"
+import {
+  createDeck,
+  updateDeck,
+  deleteDeck,
+  getUserDeckById,
+} from "@/db/queries"
+
+// Create deck schema
+const createDeckSchema = z.object({
+  name: z.string().min(1, "Name is required").max(100),
+  description: z.string().max(500).optional(),
 })
+
+export async function createDeckAction(
+  input: z.infer<typeof createDeckSchema>
+) {
+  // 1. Authenticate
+  const { userId } = await auth()
+  if (!userId) {
+    throw new Error("Unauthorized")
+  }
+
+  // 2. Validate
+  const validated = createDeckSchema.parse(input)
+
+  // 3. Use query helper to create
+  const newDeck = await createDeck(userId, validated)
+
+  // 4. Revalidate
+  revalidatePath("/decks")
+
+  return newDeck
+}
+
+// Update deck schema
+const updateDeckSchema = z.object({
+  deckId: z.string().uuid(),
+  name: z.string().min(1).max(100).optional(),
+  description: z.string().max(500).optional(),
+})
+
+export async function updateDeckAction(
+  input: z.infer<typeof updateDeckSchema>
+) {
+  const { userId } = await auth()
+  if (!userId) {
+    throw new Error("Unauthorized")
+  }
+
+  const validated = updateDeckSchema.parse(input)
+
+  // Query helper handles ownership verification
+  const updatedDeck = await updateDeck(
+    userId,
+    validated.deckId,
+    {
+      name: validated.name,
+      description: validated.description,
+    }
+  )
+
+  revalidatePath("/decks")
+  revalidatePath(`/decks/${validated.deckId}`)
+
+  return updatedDeck
+}
+
+export async function deleteDeckAction(deckId: string) {
+  const { userId } = await auth()
+  if (!userId) {
+    throw new Error("Unauthorized")
+  }
+
+  // Query helper handles ownership verification
+  await deleteDeck(userId, deckId)
+
+  revalidatePath("/decks")
+
+  return { success: true }
+}
+```
+
+```typescript
+// app/actions/card-actions.ts
+"use server"
+
+import { auth } from "@clerk/nextjs/server"
+import { revalidatePath } from "next/cache"
+import { z } from "zod"
+import { createCard, updateCard, deleteCard } from "@/db/queries"
+
+const createCardSchema = z.object({
+  deckId: z.string().uuid(),
+  front: z.string().min(1, "Front is required"),
+  back: z.string().min(1, "Back is required"),
+})
+
+export async function createCardAction(
+  input: z.infer<typeof createCardSchema>
+) {
+  const { userId } = await auth()
+  if (!userId) {
+    throw new Error("Unauthorized")
+  }
+
+  const validated = createCardSchema.parse(input)
+
+  // Query helper verifies deck ownership
+  const newCard = await createCard(userId, validated.deckId, {
+    front: validated.front,
+    back: validated.back,
+  })
+
+  revalidatePath(`/decks/${validated.deckId}`)
+
+  return newCard
+}
+
+const updateCardSchema = z.object({
+  cardId: z.string().uuid(),
+  front: z.string().min(1).optional(),
+  back: z.string().min(1).optional(),
+})
+
+export async function updateCardAction(
+  input: z.infer<typeof updateCardSchema>
+) {
+  const { userId } = await auth()
+  if (!userId) {
+    throw new Error("Unauthorized")
+  }
+
+  const validated = updateCardSchema.parse(input)
+
+  // Query helper verifies card ownership
+  const updatedCard = await updateCard(userId, validated.cardId, {
+    front: validated.front,
+    back: validated.back,
+  })
+
+  revalidatePath(`/decks/${updatedCard.deckId}`)
+
+  return updatedCard
+}
+
+export async function deleteCardAction(cardId: string) {
+  const { userId } = await auth()
+  if (!userId) {
+    throw new Error("Unauthorized")
+  }
+
+  // Query helper verifies card ownership
+  await deleteCard(userId, cardId)
+
+  // We don't know the deckId here, but we can revalidate all decks
+  revalidatePath("/decks")
+
+  return { success: true }
+}
+```
+
+### In API Routes
+
+API routes use query helpers for handling data operations:
+
+```typescript
+// app/api/decks/route.ts
+import { auth } from "@clerk/nextjs/server"
+import { NextRequest } from "next/server"
+import { getUserDecks, createDeck } from "@/db/queries"
+
+export async function GET() {
+  // Authenticate
+  const { userId } = await auth()
+  if (!userId) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  // Use query helper
+  const decks = await getUserDecks(userId)
+
+  return Response.json({ decks })
+}
+
+export async function POST(request: NextRequest) {
+  // Authenticate
+  const { userId } = await auth()
+  if (!userId) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  const body = await request.json()
+
+  // Use query helper (with error handling)
+  try {
+    const newDeck = await createDeck(userId, {
+      name: body.name,
+      description: body.description,
+    })
+
+    return Response.json({ deck: newDeck }, { status: 201 })
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Failed to create deck" },
+      { status: 400 }
+    )
+  }
+}
+```
+
+```typescript
+// app/api/decks/[deckId]/route.ts
+import { auth } from "@clerk/nextjs/server"
+import { NextRequest } from "next/server"
+import { getUserDeckById, updateDeck, deleteDeck } from "@/db/queries"
+
+export async function GET(
+  request: NextRequest,
+  { params }: { params: { deckId: string } }
+) {
+  const { userId } = await auth()
+  if (!userId) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  // Query helper handles ownership verification
+  const deck = await getUserDeckById(userId, params.deckId)
+
+  if (!deck) {
+    return Response.json({ error: "Deck not found" }, { status: 404 })
+  }
+
+  return Response.json({ deck })
+}
+
+export async function PATCH(
+  request: NextRequest,
+  { params }: { params: { deckId: string } }
+) {
+  const { userId } = await auth()
+  if (!userId) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  const body = await request.json()
+
+  try {
+    // Query helper handles ownership verification
+    const updatedDeck = await updateDeck(userId, params.deckId, body)
+    return Response.json({ deck: updatedDeck })
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Failed to update deck" },
+      { status: 400 }
+    )
+  }
+}
+
+export async function DELETE(
+  request: NextRequest,
+  { params }: { params: { deckId: string } }
+) {
+  const { userId } = await auth()
+  if (!userId) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  try {
+    // Query helper handles ownership verification
+    await deleteDeck(userId, params.deckId)
+    return Response.json({ success: true })
+  } catch (error) {
+    return Response.json(
+      { error: error instanceof Error ? error.message : "Failed to delete deck" },
+      { status: 400 }
+    )
+  }
+}
+```
+
+## Transaction Safety
+
+For complex operations that need atomicity, create transaction helper functions in your query files:
+
+```typescript
+// db/queries/decks.ts
+
+/**
+ * Duplicate a deck with all its cards (atomic operation)
+ */
+export async function duplicateDeck(userId: string, deckId: string) {
+  return await db.transaction(async (tx) => {
+    // Verify ownership using regular helper (it uses db, which works in transactions)
+    const originalDeck = await getUserDeckById(userId, deckId)
+    if (!originalDeck) {
+      throw new Error("Deck not found or access denied")
+    }
+
+    // Create new deck
+    const [newDeck] = await tx
+      .insert(decksTable)
+      .values({
+        userId,
+        name: `${originalDeck.name} (Copy)`,
+        description: originalDeck.description,
+      })
+      .returning()
+
+    // Get all cards from original deck
+    const originalCards = await tx
+      .select()
+      .from(cardsTable)
+      .where(eq(cardsTable.deckId, deckId))
+
+    // Copy all cards to new deck
+    if (originalCards.length > 0) {
+      await tx.insert(cardsTable).values(
+        originalCards.map((card) => ({
+          deckId: newDeck.id,
+          front: card.front,
+          back: card.back,
+        }))
+      )
+    }
+
+    return newDeck
+  })
+}
 ```
 
 ## Anti-Patterns to AVOID
 
-### ❌ Trusting Client Input Without Verification
+### ❌ Direct Database Queries in Server Actions/Components
 ```typescript
-// WRONG - Client could send any deckId
-async function updateDeck(deckId: string, name: string) {
-  await db.update(decksTable)
-    .set({ name })
+// ❌ WRONG - Direct database query in Server Action
+"use server"
+
+import { auth } from "@clerk/nextjs/server"
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { eq } from "drizzle-orm"
+
+export async function deleteDeckAction(deckId: string) {
+  const { userId } = await auth()
+  if (!userId) throw new Error("Unauthorized")
+
+  // Direct query - BAD!
+  await db.delete(decksTable).where(eq(decksTable.id, deckId))
+}
+
+// ✅ CORRECT - Use query helper
+"use server"
+
+import { auth } from "@clerk/nextjs/server"
+import { deleteDeck } from "@/db/queries"
+
+export async function deleteDeckAction(deckId: string) {
+  const { userId } = await auth()
+  if (!userId) throw new Error("Unauthorized")
+
+  // Uses helper function with ownership verification built-in
+  await deleteDeck(userId, deckId)
+}
+```
+
+### ❌ Query Helpers Without userId Parameter
+```typescript
+// ❌ WRONG - Query helper that doesn't require userId
+// db/queries/decks.ts
+export async function getAllDecks() {
+  // This would return ALL users' decks!
+  return await db.select().from(decksTable)
+}
+
+// ✅ CORRECT - Always require userId as first parameter
+// db/queries/decks.ts
+export async function getUserDecks(userId: string) {
+  return await db
+    .select()
+    .from(decksTable)
+    .where(eq(decksTable.userId, userId))
+}
+```
+
+### ❌ Missing Ownership Verification in Mutation Helpers
+```typescript
+// ❌ WRONG - Update without ownership check
+// db/queries/decks.ts
+export async function updateDeck(
+  userId: string,
+  deckId: string,
+  data: { name: string }
+) {
+  // Trusts that deckId belongs to userId - DANGEROUS!
+  await db
+    .update(decksTable)
+    .set({ name: data.name, updatedAt: new Date() })
     .where(eq(decksTable.id, deckId))
 }
 
-// CORRECT - Verify ownership
-async function updateDeck(deckId: string, name: string) {
+// ✅ CORRECT - Verify ownership first
+// db/queries/decks.ts
+export async function updateDeck(
+  userId: string,
+  deckId: string,
+  data: { name: string }
+) {
+  // Verify ownership
+  const deck = await getUserDeckById(userId, deckId)
+  if (!deck) {
+    throw new Error("Deck not found or access denied")
+  }
+
+  // Now safe to update
+  await db
+    .update(decksTable)
+    .set({ name: data.name, updatedAt: new Date() })
+    .where(eq(decksTable.id, deckId))
+}
+```
+
+### ❌ Skipping Query Helpers in API Routes
+```typescript
+// ❌ WRONG - Direct database access in API route
+// app/api/decks/route.ts
+import { auth } from "@clerk/nextjs/server"
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { eq } from "drizzle-orm"
+
+export async function GET() {
+  const { userId } = await auth()
+  if (!userId) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  // Direct query - should use helper instead
+  const decks = await db
+    .select()
+    .from(decksTable)
+    .where(eq(decksTable.userId, userId))
+
+  return Response.json({ decks })
+}
+
+// ✅ CORRECT - Use query helper
+// app/api/decks/route.ts
+import { auth } from "@clerk/nextjs/server"
+import { getUserDecks } from "@/db/queries"
+
+export async function GET() {
+  const { userId } = await auth()
+  if (!userId) {
+    return Response.json({ error: "Unauthorized" }, { status: 401 })
+  }
+
+  // Use centralized query helper
+  const decks = await getUserDecks(userId)
+
+  return Response.json({ decks })
+}
+```
+
+### ❌ Aggregations Without User Filter
+```typescript
+// ❌ WRONG - Counts all decks across all users
+// db/queries/decks.ts
+export async function getTotalDeckCount() {
+  const [result] = await db
+    .select({ count: sql`count(*)` })
+    .from(decksTable)
+
+  return result.count
+}
+
+// ✅ CORRECT - Count only user's decks
+// db/queries/decks.ts
+export async function getUserDeckCount(userId: string) {
+  const [result] = await db
+    .select({ count: sql`count(*)` })
+    .from(decksTable)
+    .where(eq(decksTable.userId, userId))
+
+  return result.count
+}
+```
+
+### ❌ Using Raw SQL in Query Helpers
+```typescript
+// ❌ WRONG - Raw SQL bypasses type safety and security
+// db/queries/decks.ts
+export async function searchDecks(userId: string, query: string) {
+  // Raw SQL is dangerous and bypasses Drizzle's type safety
+  return await db.execute(
+    sql`SELECT * FROM decks WHERE user_id = ${userId} AND name LIKE '%${query}%'`
+  )
+}
+
+// ✅ CORRECT - Use Drizzle's query builder
+// db/queries/decks.ts
+import { like } from "drizzle-orm"
+
+export async function searchDecks(userId: string, query: string) {
+  return await db
+    .select()
+    .from(decksTable)
+    .where(
+      and(
+        eq(decksTable.userId, userId),
+        like(decksTable.name, `%${query}%`)
+      )
+    )
+}
+```
+
+## Testing Data Isolation
+
+### Unit Testing Query Helpers
+
+Query helpers should be unit tested to ensure proper security:
+
+```typescript
+// __tests__/queries/decks.test.ts
+import { describe, it, expect } from "vitest"
+import { getUserDecks, getUserDeckById, updateDeck } from "@/db/queries"
+
+describe("Deck Query Helpers", () => {
+  it("should only return decks for the specified user", async () => {
+    const user1Id = "user_1"
+    const user2Id = "user_2"
+
+    const user1Decks = await getUserDecks(user1Id)
+    const user2Decks = await getUserDecks(user2Id)
+
+    // Ensure all returned decks belong to the correct user
+    expect(user1Decks.every((deck) => deck.userId === user1Id)).toBe(true)
+    expect(user2Decks.every((deck) => deck.userId === user2Id)).toBe(true)
+  })
+
+  it("should not allow access to other users' decks", async () => {
+    const user1Id = "user_1"
+    const user2Id = "user_2"
+    const user2DeckId = "deck_belonging_to_user2"
+
+    // User 1 should not be able to access User 2's deck
+    const deck = await getUserDeckById(user1Id, user2DeckId)
+    expect(deck).toBeNull()
+  })
+
+  it("should not allow updating other users' decks", async () => {
+    const user1Id = "user_1"
+    const user2DeckId = "deck_belonging_to_user2"
+
+    // User 1 should not be able to update User 2's deck
+    await expect(
+      updateDeck(user1Id, user2DeckId, { name: "Hacked" })
+    ).rejects.toThrow("Deck not found or access denied")
+  })
+})
+```
+
+### Integration Testing
+
+When testing any database feature in your application:
+
+1. **Setup**: Create two test users (User A and User B)
+2. **Create Resources**: Create resources for each user
+3. **Test Read Isolation**: Verify User A cannot read User B's resources
+4. **Test Update Isolation**: Verify User A cannot modify User B's resources
+5. **Test Delete Isolation**: Verify User A cannot delete User B's resources
+6. **Test List Isolation**: Verify User A's list queries only return their own data
+
+## Best Practices Checklist
+
+When creating or reviewing query helpers:
+
+- [ ] **All query helpers in `db/queries` directory**
+- [ ] **First parameter is always `userId`** (for user-specific queries)
+- [ ] **All SELECT queries filter by `userId`**
+- [ ] **All mutations verify ownership before proceeding**
+- [ ] **Ownership verification uses existing query helpers** (like `getUserDeckById`)
+- [ ] **Errors thrown for unauthorized access** with clear messages
+- [ ] **Return `null` for not found items** (instead of throwing) for GET operations
+- [ ] **Throw errors for mutations on non-existent items**
+- [ ] **Type-safe**: Proper TypeScript return types defined
+- [ ] **Documented**: JSDoc comments explaining what each function does
+- [ ] **No raw SQL queries** - use Drizzle's query builder
+- [ ] **No direct database access** outside of `db/queries` directory
+
+## Migration Guide
+
+If you have existing code with direct database queries, migrate to query helpers:
+
+### Step 1: Create Query Helpers
+Move all database queries from Server Components, Server Actions, and API routes to `db/queries/*.ts` files.
+
+### Step 2: Update Server Actions
+```typescript
+// Before
+"use server"
+import { auth } from "@clerk/nextjs/server"
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { eq, and } from "drizzle-orm"
+
+export async function deleteDeckAction(deckId: string) {
   const { userId } = await auth()
   if (!userId) throw new Error("Unauthorized")
 
@@ -281,55 +992,101 @@ async function updateDeck(deckId: string, name: string) {
     .where(and(eq(decksTable.id, deckId), eq(decksTable.userId, userId)))
     .limit(1)
 
-  if (!deck) throw new Error("Access denied")
+  if (!deck) throw new Error("Not found")
 
-  await db.update(decksTable)
-    .set({ name, updatedAt: new Date() })
-    .where(eq(decksTable.id, deckId))
+  await db.delete(decksTable).where(eq(decksTable.id, deckId))
+}
+
+// After
+"use server"
+import { auth } from "@clerk/nextjs/server"
+import { deleteDeck } from "@/db/queries"
+
+export async function deleteDeckAction(deckId: string) {
+  const { userId } = await auth()
+  if (!userId) throw new Error("Unauthorized")
+
+  await deleteDeck(userId, deckId)
 }
 ```
 
-### ❌ Counting or Aggregating Without User Filter
+### Step 3: Update Server Components
 ```typescript
-// WRONG - Counts all decks
-const totalDecks = await db
-  .select({ count: sql`count(*)` })
-  .from(decksTable)
+// Before
+import { auth } from "@clerk/nextjs/server"
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { eq } from "drizzle-orm"
 
-// CORRECT - Counts only user's decks
-const [result] = await db
-  .select({ count: sql`count(*)` })
-  .from(decksTable)
-  .where(eq(decksTable.userId, userId))
+export default async function DecksPage() {
+  const { userId } = await auth()
+  if (!userId) redirect("/")
+
+  const decks = await db
+    .select()
+    .from(decksTable)
+    .where(eq(decksTable.userId, userId))
+
+  return <div>...</div>
+}
+
+// After
+import { auth } from "@clerk/nextjs/server"
+import { getUserDecks } from "@/db/queries"
+
+export default async function DecksPage() {
+  const { userId } = await auth()
+  if (!userId) redirect("/")
+
+  const decks = await getUserDecks(userId)
+
+  return <div>...</div>
+}
 ```
 
-### ❌ Using Raw SQL Without Parameters
+### Step 4: Update API Routes
 ```typescript
-// WRONG - Vulnerable and bypasses type safety
-await db.execute(sql`SELECT * FROM decks WHERE id = ${deckId}`)
+// Before
+import { auth } from "@clerk/nextjs/server"
+import { db } from "@/db"
+import { decksTable } from "@/db/schema"
+import { eq } from "drizzle-orm"
 
-// CORRECT - Use query builder with proper filters
-const decks = await db
-  .select()
-  .from(decksTable)
-  .where(and(eq(decksTable.id, deckId), eq(decksTable.userId, userId)))
+export async function GET() {
+  const { userId } = await auth()
+  if (!userId) return Response.json({ error: "Unauthorized" }, { status: 401 })
+
+  const decks = await db
+    .select()
+    .from(decksTable)
+    .where(eq(decksTable.userId, userId))
+
+  return Response.json({ decks })
+}
+
+// After
+import { auth } from "@clerk/nextjs/server"
+import { getUserDecks } from "@/db/queries"
+
+export async function GET() {
+  const { userId } = await auth()
+  if (!userId) return Response.json({ error: "Unauthorized" }, { status: 401 })
+
+  const decks = await getUserDecks(userId)
+
+  return Response.json({ decks })
+}
 ```
-
-## Testing Data Isolation
-
-When testing any database feature:
-
-1. Create two test users
-2. Create resources for each user
-3. Verify User A cannot access User B's resources
-4. Verify User A cannot modify User B's resources
-5. Verify User A cannot delete User B's resources
 
 ## Remember
 
-- **AUTHENTICATION**: Get userId from `auth()`
-- **AUTHORIZATION**: Filter by userId in queries
-- **VERIFICATION**: Check ownership before mutations
-- **ISOLATION**: Never expose other users' data
+- ⚠️ **CRITICAL**: ALL database operations MUST go through query helpers in `db/queries`
+- **AUTHENTICATION**: Get userId from `auth()` in the calling code (Server Actions, Components, API routes)
+- **AUTHORIZATION**: Pass userId to query helpers, which handle filtering and verification
+- **VERIFICATION**: Query helpers MUST verify ownership before mutations
+- **ISOLATION**: Query helpers MUST never return or modify other users' data
+- **CENTRALIZATION**: Having all queries in one place makes security reviews easier
+- **REUSABILITY**: Same query helpers used everywhere eliminates duplication
+- **MAINTAINABILITY**: Changes to query logic happen in one place
 
-Every database query is a potential security vulnerability if not properly filtered by userId.
+Every database query is a potential security vulnerability if not properly filtered by userId. Using centralized query helpers ensures consistent security enforcement across your entire application.

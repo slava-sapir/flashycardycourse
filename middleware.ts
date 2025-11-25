@@ -1,6 +1,32 @@
-import { clerkMiddleware } from "@clerk/nextjs/server";
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server";
+import { NextResponse } from "next/server";
 
-export default clerkMiddleware();
+const isProtectedRoute = createRouteMatcher([
+  "/dashboard(.*)",
+  "/decks(.*)",
+  "/cards(.*)",
+  "/study(.*)",
+  "/api/decks(.*)",
+  "/api/cards(.*)",
+]);
+
+const isAuthRoute = createRouteMatcher(["/sign-in(.*)", "/sign-up(.*)"]);
+
+export default clerkMiddleware(async (auth, req) => {
+  // Redirect auth routes to homepage since we use modals
+  if (isAuthRoute(req)) {
+    return NextResponse.redirect(new URL("/", req.url));
+  }
+
+  // Protect routes and redirect to homepage if not authenticated
+  if (isProtectedRoute(req)) {
+    const homeUrl = new URL("/", req.url);
+    await auth.protect({
+      unauthenticatedUrl: homeUrl.toString(),
+      unauthorizedUrl: homeUrl.toString(),
+    });
+  }
+});
 
 export const config = {
   matcher: [

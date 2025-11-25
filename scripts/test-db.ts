@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { drizzle } from 'drizzle-orm/neon-http';
 import { eq } from 'drizzle-orm';
-import { usersTable } from '../db/schema';
+import { decksTable, cardsTable } from '../db/schema';
 
 const db = drizzle(process.env.DATABASE_URL!);
 
@@ -9,30 +9,39 @@ async function main() {
   try {
     console.log('Testing database connection...\n');
 
-    // Create a new user
-    const user: typeof usersTable.$inferInsert = {
-      name: 'John',
-      age: 30,
-      email: 'john@example.com',
+    // Create a test deck
+    const deck: typeof decksTable.$inferInsert = {
+      userId: 'test_user_id',
+      name: 'Test Deck',
+      description: 'A test deck for database connection',
     };
 
-    await db.insert(usersTable).values(user);
-    console.log('✓ New user created!');
+    const [newDeck] = await db.insert(decksTable).values(deck).returning();
+    console.log('✓ New deck created!', newDeck);
 
-    // Read all users
-    const users = await db.select().from(usersTable);
-    console.log('✓ Getting all users from the database:', users);
+    // Read all decks
+    const decks = await db.select().from(decksTable);
+    console.log('✓ Getting all decks from the database:', decks);
 
-    // Update user
-    await db
-      .update(usersTable)
-      .set({ age: 31 })
-      .where(eq(usersTable.email, user.email));
-    console.log('✓ User info updated!');
+    // Create a test card
+    if (newDeck) {
+      const card: typeof cardsTable.$inferInsert = {
+        deckId: newDeck.id,
+        front: 'Test Question',
+        back: 'Test Answer',
+      };
 
-    // Delete user
-    await db.delete(usersTable).where(eq(usersTable.email, user.email));
-    console.log('✓ User deleted!');
+      const [newCard] = await db.insert(cardsTable).values(card).returning();
+      console.log('✓ New card created!', newCard);
+
+      // Read all cards
+      const cards = await db.select().from(cardsTable);
+      console.log('✓ Getting all cards from the database:', cards);
+
+      // Delete test data
+      await db.delete(decksTable).where(eq(decksTable.id, newDeck.id));
+      console.log('✓ Test deck and cards deleted (cascade)!');
+    }
 
     console.log('\n✅ Database test completed successfully!');
   } catch (error) {

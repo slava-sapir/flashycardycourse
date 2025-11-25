@@ -1,4 +1,4 @@
-import { integer, pgTable, varchar, text, timestamp } from "drizzle-orm/pg-core";
+import { integer, pgTable, varchar, text, timestamp, boolean } from "drizzle-orm/pg-core";
 
 // Decks table - each deck is a collection of flashcards
 export const decksTable = pgTable("decks", {
@@ -6,6 +6,7 @@ export const decksTable = pgTable("decks", {
   userId: varchar({ length: 255 }).notNull(), // Clerk user ID
   name: varchar({ length: 255 }).notNull(),
   description: text(),
+  aiGenerationUsed: boolean().default(false).notNull(), // Track if AI generation has been used for this deck
   createdAt: timestamp().defaultNow().notNull(),
   updatedAt: timestamp().defaultNow().notNull(),
 });

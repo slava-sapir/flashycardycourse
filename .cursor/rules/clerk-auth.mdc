@@ -185,7 +185,7 @@ export default async function DecksPage() {
   // 1. Authenticate user
   const { userId } = await auth()
   if (!userId) {
-    redirect("/sign-in")
+    redirect("/")
   }
 
   // 2. Query with userId filter
@@ -203,12 +203,14 @@ export default async function DecksPage() {
 ```
 
 ## Middleware Configuration
-The [middleware.ts](mdc:middleware.ts) file protects routes. Ensure protected routes require authentication:
+The [middleware.ts](mdc:middleware.ts) file protects routes and redirects unauthenticated users to the homepage:
 
 ```typescript
 import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server"
+import { NextResponse } from "next/server"
 
 const isProtectedRoute = createRouteMatcher([
+  "/dashboard(.*)",
   "/decks(.*)",
   "/cards(.*)",
   "/study(.*)",
@@ -216,9 +218,20 @@ const isProtectedRoute = createRouteMatcher([
   "/api/cards(.*)",
 ])
 
+const isAuthRoute = createRouteMatcher(["/sign-in(.*)", "/sign-up(.*)"]);
+
 export default clerkMiddleware(async (auth, req) => {
+  // Redirect auth routes to homepage since we use modals
+  if (isAuthRoute(req)) {
+    return NextResponse.redirect(new URL("/", req.url));
+  }
+
+  // Protect routes and redirect to homepage if not authenticated
   if (isProtectedRoute(req)) {
-    await auth.protect()
+    await auth.protect({
+      unauthenticatedUrl: "/",
+      unauthorizedUrl: "/",
+    });
   }
 })
 
@@ -226,6 +239,8 @@ export const config = {
   matcher: ["/((?!.*\\..*|_next).*)", "/", "/(api|trpc)(.*)"],
 }
 ```
+
+**Note:** This app does not have `/sign-in` or `/sign-up` pages. Authentication happens via modal dialogs on the homepage. The middleware redirects any attempts to access these routes to the homepage.
 
 ## Common Security Mistakes to AVOID
 

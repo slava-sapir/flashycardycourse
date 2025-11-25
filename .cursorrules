@@ -3,6 +3,22 @@
 ## Project Overview
 This is a Next.js application built with TypeScript, React, and shadcn UI for all UI components.
 
+## ⚠️ CRITICAL PROJECT RULES - READ FIRST
+
+### UI Component Policy
+**THIS PROJECT USES SHADCN UI EXCLUSIVELY. ABSOLUTELY NO CUSTOM UI COMPONENTS ARE ALLOWED.**
+- ONLY use shadcn UI components for ALL user interface elements
+- NEVER create custom buttons, inputs, cards, dialogs, or any other UI components
+- NEVER write custom CSS for interactive UI elements
+- If you need a UI component, install it from shadcn UI first
+
+### Authentication UI Policy
+**NO SIGN IN/SIGN UP PAGES ALLOWED. USE MODALS ONLY.**
+- NEVER create `/sign-in` or `/sign-up` route pages
+- ALWAYS use shadcn Dialog component with Clerk's `<SignIn />` and `<SignUp />` components
+- ALWAYS use shadcn Button component for authentication triggers
+- Authentication MUST happen in modals that overlay the current page
+
 ## Technology Stack
 - **Framework**: Next.js 15+ (App Router)
 - **Language**: TypeScript
@@ -131,6 +147,103 @@ npm run db:push
 npm run db:migrate
 ```
 
+## Clerk Authentication UI Guidelines
+
+### ⚠️ CRITICAL: NO SIGN IN/SIGN UP PAGES ALLOWED
+**DO NOT CREATE `/sign-in` OR `/sign-up` PAGES. USE MODALS ONLY.**
+
+### Authentication UI Requirements
+- **NEVER create dedicated sign-in or sign-up pages**
+- **ALWAYS use shadcn Dialog component** to launch Clerk authentication modals
+- **ALWAYS use shadcn Button component** for sign-in and sign-up triggers
+- Use Clerk's `<SignIn />` and `<SignUp />` components inside shadcn Dialog components
+- Authentication should happen in modals/dialogs that overlay the current page
+
+### Implementation Pattern
+
+```typescript
+"use client"
+
+import { SignIn, SignUp } from "@clerk/nextjs"
+import { Dialog, DialogContent, DialogTrigger } from "@/components/ui/dialog"
+import { Button } from "@/components/ui/button"
+
+export function AuthButtons() {
+  return (
+    <div className="flex gap-2">
+      {/* Sign In Modal */}
+      <Dialog>
+        <DialogTrigger asChild>
+          <Button variant="outline">Sign In</Button>
+        </DialogTrigger>
+        <DialogContent className="sm:max-w-[425px]">
+          <SignIn routing="hash" />
+        </DialogContent>
+      </Dialog>
+
+      {/* Sign Up Modal */}
+      <Dialog>
+        <DialogTrigger asChild>
+          <Button>Sign Up</Button>
+        </DialogTrigger>
+        <DialogContent className="sm:max-w-[425px]">
+          <SignUp routing="hash" />
+        </DialogContent>
+      </Dialog>
+    </div>
+  )
+}
+```
+
+### Key Requirements
+- **Use `routing="hash"`** on Clerk components when using in modals
+- **Use shadcn Button** for all authentication triggers (NEVER custom buttons)
+- **Use shadcn Dialog** for all authentication modals (NEVER custom modals)
+- **Remove any `/sign-in` or `/sign-up` route pages** if they exist
+- **Update middleware** to not require auth pages since they don't exist
+
+### Middleware Configuration
+Middleware redirects unauthenticated users to homepage and prevents access to non-existent auth pages:
+
+```typescript
+import { clerkMiddleware, createRouteMatcher } from "@clerk/nextjs/server"
+import { NextResponse } from "next/server"
+
+const isProtectedRoute = createRouteMatcher([
+  "/dashboard(.*)",
+  "/decks(.*)",
+  "/cards(.*)",
+  "/study(.*)",
+  "/api/decks(.*)",
+  "/api/cards(.*)",
+])
+
+const isAuthRoute = createRouteMatcher(["/sign-in(.*)", "/sign-up(.*)"]);
+
+export default clerkMiddleware(async (auth, req) => {
+  // Redirect auth routes to homepage since we use modals
+  if (isAuthRoute(req)) {
+    return NextResponse.redirect(new URL("/", req.url));
+  }
+
+  // Protect routes and redirect to homepage if not authenticated
+  if (isProtectedRoute(req)) {
+    await auth.protect({
+      unauthenticatedUrl: "/",
+      unauthorizedUrl: "/",
+    });
+  }
+})
+
+export const config = {
+  matcher: ["/((?!.*\\..*|_next).*)", "/", "/(api|trpc)(.*)"],
+}
+```
+
+**Note:** This app does not have `/sign-in` or `/sign-up` pages. Authentication happens via modal dialogs on the homepage. The middleware:
+- Redirects any attempts to access `/sign-in` or `/sign-up` to the homepage
+- Redirects unauthenticated users trying to access protected routes to the homepage
+
 ## Data Fetching & Server Actions Guidelines
 
 ### Data Retrieval Pattern
@@ -145,7 +258,7 @@ import { eq } from "drizzle-orm"
 
 export default async function DecksPage() {
   const { userId } = await auth()
-  if (!userId) redirect("/sign-in")
+  if (!userId) redirect("/")
   
   // Fetch data directly in Server Component
   const decks = await db
@@ -407,6 +520,17 @@ export function CreateDeckForm() {
 
 ## shadcn UI Guidelines
 
+### ⚠️ CRITICAL: NO CUSTOM UI COMPONENTS ALLOWED
+**THIS PROJECT USES SHADCN UI EXCLUSIVELY. ABSOLUTELY NO CUSTOM UI COMPONENTS SHOULD BE CREATED.**
+
+### Strict UI Component Policy
+- **ONLY shadcn UI components** are allowed for ALL user interface elements
+- **NEVER create custom buttons, inputs, cards, or any other UI components**
+- **NEVER write custom CSS for interactive elements**
+- **ALL UI elements must come from shadcn UI library**
+- If a shadcn component doesn't exist for your needs, find the closest shadcn component and use it
+- If absolutely necessary, compose existing shadcn components together, but NEVER create custom UI from scratch
+
 ### Initialization
 If shadcn UI is not initialized in the project, use:
 ```bash
@@ -499,5 +623,6 @@ import { Button } from "@/components/ui/button"
 ## Notes
 - This project uses the Next.js App Router (not Pages Router)
 - Server Components are the default; use "use client" only when needed
-- All UI should use shadcn components for consistency
+- **⚠️ CRITICAL: ALL UI MUST USE SHADCN COMPONENTS - NO CUSTOM UI COMPONENTS ALLOWED**
+- **⚠️ NO `/sign-in` OR `/sign-up` PAGES - USE MODALS ONLY**
 
